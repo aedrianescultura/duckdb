@@ -1,0 +1,194 @@
+# name: test/sql/delete/truncate_mvcc.test
+# description: Test MVCC safety of O(1) TRUNCATE (generation bump path, no unique/PK index)
+# group: [delete]
+
+# ------------------------------------------------------------------
+# Basic: insert N rows, TRUNCATE, count is 0, reinsert works
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t1(i INTEGER);
+
+statement ok
+INSERT INTO t1 SELECT * FROM range(1000);
+
+query I
+SELECT COUNT(*) FROM t1
+----
+1000
+
+statement ok
+TRUNCATE t1;
+
+query I
+SELECT COUNT(*) FROM t1
+----
+0
+
+statement ok
+INSERT INTO t1 SELECT * FROM range(5);
+
+query I
+SELECT COUNT(*) FROM t1
+----
+5
+
+query I
+SELECT SUM(i) FROM t1
+----
+10
+
+# ------------------------------------------------------------------
+# Rollback: BEGIN; TRUNCATE; ROLLBACK restores the rows
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t2(i INTEGER);
+
+statement ok
+INSERT INTO t2 SELECT * FROM range(100);
+
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+TRUNCATE t2;
+
+query I
+SELECT COUNT(*) FROM t2
+----
+0
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT COUNT(*) FROM t2
+----
+100
+
+# repeated truncate/rollback must keep the generation consistent
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+TRUNCATE t2;
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT COUNT(*) FROM t2
+----
+100
+
+# truncate again, this time commit
+statement ok
+TRUNCATE t2;
+
+query I
+SELECT COUNT(*) FROM t2
+----
+0
+
+# ------------------------------------------------------------------
+# Read-your-own-writes: insert + truncate + insert within one txn
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t3(i INTEGER);
+
+statement ok
+INSERT INTO t3 SELECT * FROM range(10);
+
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO t3 VALUES (100), (101);
+
+statement ok
+TRUNCATE t3;
+
+query I
+SELECT COUNT(*) FROM t3
+----
+0
+
+statement ok
+INSERT INTO t3 VALUES (42);
+
+query I
+SELECT COUNT(*) FROM t3
+----
+1
+
+query I
+SELECT i FROM t3
+----
+42
+
+statement ok
+COMMIT;
+
+query I
+SELECT COUNT(*) FROM t3
+----
+1
+
+query I
+SELECT i FROM t3
+----
+42
+
+# ------------------------------------------------------------------
+# MVCC isolation across connections
+# con1 takes a snapshot, con2 truncates (autocommit). con1 must still
+# see the old rows; a fresh con3 sees 0. After con1 commits, it sees 0.
+# ------------------------------------------------------------------
+statement ok con1
+CREATE TABLE mvcc(i INTEGER);
+
+statement ok con1
+INSERT INTO mvcc SELECT * FROM range(500);
+
+# con1 opens a transaction (snapshot taken on first read)
+statement ok con1
+BEGIN TRANSACTION;
+
+query I con1
+SELECT COUNT(*) FROM mvcc
+----
+500
+
+# con2 truncates in autocommit mode
+statement ok con2
+TRUNCATE mvcc;
+
+# con1 still sees its snapshot
+query I con1
+SELECT COUNT(*) FROM mvcc
+----
+500
+
+# a fresh connection sees the truncated (empty) table
+query I con3
+SELECT COUNT(*) FROM mvcc
+----
+0
+
+# con1 commits its (read-only) transaction
+statement ok con1
+COMMIT;
+
+# now con1 sees the committed truncate
+query I con1
+SELECT COUNT(*) FROM mvcc
+----
+0
+
+# reinsert and verify both connections agree
+statement ok con1
+INSERT INTO mvcc VALUES (7);
+
+query I con3
+SELECT COUNT(*) FROM mvcc
+----
+1

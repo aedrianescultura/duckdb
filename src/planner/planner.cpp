@@ -177,6 +177,7 @@ void Planner::CreatePlan(unique_ptr<SQLStatement> statement) {
 	case StatementType::INSERT_STATEMENT:
 	case StatementType::COPY_STATEMENT:
 	case StatementType::DELETE_STATEMENT:
+	case StatementType::TRUNCATE_STATEMENT:
 	case StatementType::UPDATE_STATEMENT:
 	case StatementType::CREATE_STATEMENT:
 	case StatementType::DROP_STATEMENT:

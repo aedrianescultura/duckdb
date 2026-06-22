@@ -22,6 +22,7 @@
 #include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/delete_info.hpp"
+#include "duckdb/transaction/truncate_info.hpp"
 #include "duckdb/transaction/update_info.hpp"
 
 namespace duckdb {
@@ -290,6 +291,15 @@ void WALWriteState::CommitEntry(UndoFlags type, data_ptr_t data) {
 		auto info = reinterpret_cast<UpdateInfo *>(data);
 		if (!info->segment->column_data.GetTableInfo().IsTemporary()) {
 			WriteUpdate(*info);
+		}
+		break;
+	}
+	case UndoFlags::TRUNCATE: {
+		// O(1) truncate: write a USE_TABLE + TRUNCATE record so the bump is durable across crashes.
+		auto info = reinterpret_cast<TruncateInfo *>(data);
+		if (!info->table->GetStorage().IsTemporary()) {
+			SwitchTable(*info->table, UndoFlags::TRUNCATE);
+			log.WriteTruncate();
 		}
 		break;
 	}

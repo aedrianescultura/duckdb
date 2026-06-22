@@ -1308,6 +1308,26 @@ void DataTable::CommitAppend(transaction_t commit_id, idx_t row_start, idx_t cou
 	row_groups->CommitAppend(commit_id, row_start, count);
 }
 
+void DataTable::RecordCommittedTruncate(transaction_t commit_id, transaction_t committer) {
+	last_committed_truncate_commit_id = commit_id;
+	last_committed_truncate_committer = committer;
+}
+
+void DataTable::RecordCommittedModification(transaction_t commit_id, transaction_t committer) {
+	last_committed_modification_commit_id = commit_id;
+	last_committed_modification_committer = committer;
+}
+
+void DataTable::GetLastCommittedTruncate(transaction_t &commit_id, transaction_t &committer) const {
+	commit_id = last_committed_truncate_commit_id;
+	committer = last_committed_truncate_committer;
+}
+
+void DataTable::GetLastCommittedModification(transaction_t &commit_id, transaction_t &committer) const {
+	commit_id = last_committed_modification_commit_id;
+	committer = last_committed_modification_committer;
+}
+
 void DataTable::RevertAppendInternal(idx_t start_row) {
 	D_ASSERT(IsMainTable());
 	// revert appends made to row_groups
@@ -1618,6 +1638,111 @@ idx_t DataTable::Delete(TableDeleteState &state, ClientContext &context, DuckTab
 		delete_count += row_groups->Delete(transaction, table_entry, ids + current_offset, current_count);
 	}
 	return delete_count;
+}
+
+void DataTable::TruncateScanDelete(ClientContext &context, DuckTableEntry &table_entry) {
+	// Delete all rows (committed + transaction-local) by scanning row IDs and calling Delete.
+	// DataTable::Delete routes committed row IDs to row_groups->Delete and local IDs (>= MAX_ROW_ID)
+	// to LocalStorage::Delete, so a single scan-and-delete loop covers both.
+	auto &transaction = DuckTransaction::Get(context, db);
+	auto &local_storage = LocalStorage::Get(transaction);
+
+	// Scan only the row ID column.
+	vector<StorageIndex> scan_column_ids;
+	scan_column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	vector<LogicalType> scan_types = {LogicalType::ROW_TYPE};
+
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(Allocator::Get(db), scan_types);
+
+	// Initialize the delete state (no FK constraints — the binder already verified them).
+	vector<unique_ptr<BoundConstraint>> empty_constraints;
+	auto delete_state = InitializeDelete(table_entry, context, empty_constraints);
+
+	// Phase 1: scan committed rows with MVCC awareness and delete them.
+	// Using InitializeScan + table_state.Scan(transaction, ...) respects in-progress deletions,
+	// so the loop terminates once all rows are marked deleted in this transaction.
+	TableScanState committed_scan;
+	committed_scan.Initialize(scan_column_ids);
+	row_groups->InitializeScan(context, committed_scan.table_state, scan_column_ids, nullptr);
+
+	while (true) {
+		scan_chunk.Reset();
+		if (!committed_scan.table_state.Scan(transaction, scan_chunk)) {
+			break;
+		}
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		Delete(*delete_state, context, table_entry, scan_chunk.data[0], scan_chunk.size());
+	}
+
+	// Phase 2: scan and delete transaction-local rows (appended but not yet committed).
+	TableScanState local_table_scan;
+	local_table_scan.Initialize(scan_column_ids);
+	local_storage.InitializeScan(*this, local_table_scan.local_state, nullptr);
+
+	while (true) {
+		scan_chunk.Reset();
+		local_storage.Scan(local_table_scan.local_state, scan_column_ids, scan_chunk);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		// Row IDs >= MAX_ROW_ID are local; DataTable::Delete routes them to LocalStorage::Delete.
+		Delete(*delete_state, context, table_entry, scan_chunk.data[0], scan_chunk.size());
+	}
+}
+
+void DataTable::TruncateLocalStorage(ClientContext &context, DuckTableEntry &table_entry) {
+	// Discard this transaction's uncommitted local appends for this table.
+	// Local rows are this-txn-only and carry no generation, so the generation bump does not affect them.
+	// We delete them via the existing local-delete path: once deleted_rows == total_rows the storage
+	// is rolled back on commit, and a subsequent INSERT re-creates fresh local storage (read-your-own-writes).
+	auto &transaction = DuckTransaction::Get(context, db);
+	auto &local_storage = LocalStorage::Get(transaction);
+	if (!local_storage.Find(*this)) {
+		return;
+	}
+
+	vector<StorageIndex> scan_column_ids;
+	scan_column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+	vector<LogicalType> scan_types = {LogicalType::ROW_TYPE};
+
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(Allocator::Get(db), scan_types);
+
+	vector<unique_ptr<BoundConstraint>> empty_constraints;
+	auto delete_state = InitializeDelete(table_entry, context, empty_constraints);
+
+	TableScanState local_table_scan;
+	local_table_scan.Initialize(scan_column_ids);
+	local_storage.InitializeScan(*this, local_table_scan.local_state, nullptr);
+
+	while (true) {
+		scan_chunk.Reset();
+		local_storage.Scan(local_table_scan.local_state, scan_column_ids, scan_chunk);
+		if (scan_chunk.size() == 0) {
+			break;
+		}
+		Delete(*delete_state, context, table_entry, scan_chunk.data[0], scan_chunk.size());
+	}
+}
+
+void DataTable::Truncate(ClientContext &context, DuckTableEntry &table_entry) {
+	if (HasUniqueIndexes()) {
+		// O(1) truncate via generation bump does not yet remove unique-index entries, which would
+		// prevent re-inserting the same keys. Until that is supported, fall back to the O(n)
+		// scan-and-delete path which correctly removes index entries. (phase3)
+		TruncateScanDelete(context, table_entry);
+		return;
+	}
+
+	// O(1) path: drop uncommitted local appends, then bump the truncate generation so all
+	// committed row groups born before the bump become truncated-dead for this and future snapshots.
+	auto &transaction = DuckTransaction::Get(context, db);
+	TruncateLocalStorage(context, table_entry);
+	auto new_generation = row_groups->Truncate(TransactionData(transaction));
+	transaction.PushTruncate(table_entry, *row_groups, new_generation);
 }
 
 //===--------------------------------------------------------------------===//

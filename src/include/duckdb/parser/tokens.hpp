@@ -46,6 +46,7 @@ class LogicalPlanStatement;
 class MultiStatement;
 class CopyDatabaseStatement;
 class MergeIntoStatement;
+class TruncateStatement;
 
 //===--------------------------------------------------------------------===//
 // Query Node

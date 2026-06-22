@@ -43,6 +43,7 @@ add_library_unity(
   logical_simple.cpp
   logical_top_n.cpp
   logical_trigger.cpp
+  logical_truncate.cpp
   logical_unconditional_join.cpp
   logical_unnest.cpp
   logical_update.cpp

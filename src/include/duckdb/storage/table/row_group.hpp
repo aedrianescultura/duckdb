@@ -113,6 +113,11 @@ private:
 	mutable vector<shared_ptr<ColumnData>> columns;
 
 public:
+	//! The truncate generation at which this row group was born. Used for truncate visibility.
+	//! Persisted via RowGroupPointer (defaults to 0 for back-compat with old files).
+	idx_t birth_generation = 0;
+
+public:
 	void MoveToCollection(RowGroupCollection &collection);
 	RowGroupCollection &GetCollection() const {
 		return collection.get();

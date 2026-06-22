@@ -1,7 +1,9 @@
 #include "duckdb/transaction/rollback_state.hpp"
 #include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/delete_info.hpp"
+#include "duckdb/transaction/truncate_info.hpp"
 #include "duckdb/transaction/update_info.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
 
 #include "duckdb/storage/table/chunk_info.hpp"
 
@@ -42,6 +44,12 @@ void RollbackState::RollbackEntry(UndoFlags type, data_ptr_t data) {
 	case UndoFlags::UPDATE_TUPLE: {
 		auto info = reinterpret_cast<UpdateInfo *>(data);
 		info->segment->RollbackUpdate(*info);
+		break;
+	}
+	case UndoFlags::TRUNCATE: {
+		auto info = reinterpret_cast<TruncateInfo *>(data);
+		// undo the generation bump for this truncate
+		info->collection->RollbackTruncate(info->generation);
 		break;
 	}
 	case UndoFlags::ATTACHED_DATABASE: {

@@ -256,6 +256,7 @@ protected:
 	void ReplayInsert();
 	void ReplayRowGroupData();
 	void ReplayDelete();
+	void ReplayTruncate();
 	void ReplayUpdate();
 	void ReplayCheckpoint();
 
@@ -635,6 +636,9 @@ void WriteAheadLogDeserializer::ReplayEntry(WALType entry_type) {
 		break;
 	case WALType::DELETE_TUPLE:
 		ReplayDelete();
+		break;
+	case WALType::TRUNCATE:
+		ReplayTruncate();
 		break;
 	case WALType::UPDATE_TUPLE:
 		ReplayUpdate();
@@ -1211,6 +1215,21 @@ void WriteAheadLogDeserializer::ReplayDelete() {
 	}
 	TableDeleteState delete_state;
 	storage.Delete(delete_state, context, *state.current_table, row_identifiers, chunk.size());
+}
+
+void WriteAheadLogDeserializer::ReplayTruncate() {
+	// The TRUNCATE record carries no payload - it applies to the table set via USE_TABLE.
+	if (DeserializeOnly()) {
+		return;
+	}
+	if (!state.current_table) {
+		throw SerializationException("truncate without a table");
+	}
+	// Apply the truncate via the live code path: this bumps the row group collection generation
+	// so the loaded (old-checkpoint) row groups become truncated-dead. The replay transaction commit
+	// (on WAL_FLUSH) stamps the commit id on the truncate event.
+	auto &storage = state.current_table->GetStorage();
+	storage.Truncate(context, *state.current_table);
 }
 
 void WriteAheadLogDeserializer::ReplayUpdate() {

@@ -26,6 +26,7 @@ add_library_unity(
   bind_set.cpp
   bind_simple.cpp
   bind_summarize.cpp
+  bind_truncate.cpp
   bind_update.cpp
   bind_update_extensions.cpp
   bind_vacuum.cpp)

@@ -1,0 +1,90 @@
+# name: test/sql/delete/truncate_unique_fallback.test
+# description: TRUNCATE on a table with a unique/primary key uses the O(n) fallback and removes index entries
+# group: [delete]
+
+# ------------------------------------------------------------------
+# PRIMARY KEY: truncate then reinsert the same keys (must succeed)
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE pk(i INTEGER PRIMARY KEY, j INTEGER);
+
+statement ok
+INSERT INTO pk SELECT i, i FROM range(100) t(i);
+
+# the same key cannot be inserted twice (index is live)
+statement error
+INSERT INTO pk VALUES (5, 5);
+----
+<REGEX>:.*violates primary key.*
+
+statement ok
+TRUNCATE pk;
+
+query I
+SELECT COUNT(*) FROM pk
+----
+0
+
+# reinsert the same keys: only works if the fallback removed index entries
+statement ok
+INSERT INTO pk SELECT i, i FROM range(100) t(i);
+
+query I
+SELECT COUNT(*) FROM pk
+----
+100
+
+query I
+SELECT SUM(i) FROM pk
+----
+4950
+
+# ------------------------------------------------------------------
+# UNIQUE constraint: same behavior
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE uq(i INTEGER UNIQUE, j INTEGER);
+
+statement ok
+INSERT INTO uq VALUES (1, 1), (2, 2), (3, 3);
+
+statement ok
+TRUNCATE uq;
+
+statement ok
+INSERT INTO uq VALUES (1, 10), (2, 20), (3, 30);
+
+query II
+SELECT i, j FROM uq ORDER BY i
+----
+1	10
+2	20
+3	30
+
+# ------------------------------------------------------------------
+# Rollback of a unique-table truncate restores the rows
+# ------------------------------------------------------------------
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+TRUNCATE uq;
+
+query I
+SELECT COUNT(*) FROM uq
+----
+0
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT COUNT(*) FROM uq
+----
+3
+
+# the unique index is still enforced after rollback
+statement error
+INSERT INTO uq VALUES (1, 99);
+----
+<REGEX>:.*violates unique constraint.*

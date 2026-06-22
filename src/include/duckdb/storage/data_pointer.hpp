@@ -87,6 +87,9 @@ struct RowGroupPointer {
 	//! Per-column metadata blocks beyond the start block
 	//! Each column entry contains the additional block IDs that the column's metadata spans (excluding the start block)
 	PerColumnMetadataBlocks per_column_metadata_blocks;
+	//! O(1) TRUNCATE generation at which this row group was born. Row groups born before the collection's
+	//! committed truncate generation are dead. Defaults to 0 (no truncate) for back-compat with old files.
+	idx_t birth_generation = 0;
 };
 
 } // namespace duckdb

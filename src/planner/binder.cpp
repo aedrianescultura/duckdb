@@ -1,5 +1,6 @@
 #include "duckdb/planner/binder.hpp"
 
+#include "duckdb/parser/statement/truncate_statement.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
@@ -85,6 +86,8 @@ BoundStatement Binder::Bind(SQLStatement &statement) {
 		return Bind(statement.Cast<InsertStatement>());
 	case StatementType::DELETE_STATEMENT:
 		return Bind(statement.Cast<DeleteStatement>());
+	case StatementType::TRUNCATE_STATEMENT:
+		return Bind(statement.Cast<TruncateStatement>());
 	case StatementType::UPDATE_STATEMENT:
 		return Bind(statement.Cast<UpdateStatement>());
 	case StatementType::RELATION_STATEMENT:

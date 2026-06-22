@@ -147,6 +147,9 @@ UndoBufferProperties UndoBuffer::GetProperties() {
 			properties.has_deletes = true;
 			break;
 		}
+		case UndoFlags::TRUNCATE:
+			properties.has_truncate = true;
+			break;
 		case UndoFlags::CATALOG_ENTRY: {
 			properties.has_catalog_changes = true;
 

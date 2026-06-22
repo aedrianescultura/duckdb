@@ -99,6 +99,10 @@ public:
 private:
 	void CommitEntryDrop(CatalogEntry &entry, data_ptr_t extra_data, CommitInfo &info);
 	void CommitDelete(DeleteInfo &info);
+	//! Throw a TransactionException if a concurrent TRUNCATE on this table committed after we started.
+	void CheckTruncateConflict(DataTable &storage);
+	//! Throw a TransactionException if a concurrent modification on this table committed after we started.
+	void CheckModificationConflict(DataTable &storage);
 
 private:
 	DuckTransaction &transaction;

@@ -1,0 +1,66 @@
+# name: test/sql/transactions/truncate_concurrent.test_slow
+# description: Stress: concurrent inserts while one thread periodically truncates (no crash/corruption)
+# group: [transactions]
+
+statement ok
+CREATE TABLE t(i INTEGER);
+
+statement ok
+INSERT INTO t SELECT * FROM range(100);
+
+# thread 0 periodically truncates; all other threads insert.
+# conflicts between a truncate and a concurrent insert are expected and tolerated
+# via "statement maybe": the run must complete without crash or corruption.
+concurrentloop threadid 0 8
+
+loop i 0 50
+
+onlyif threadid=0
+statement maybe
+TRUNCATE t
+----
+
+skipif threadid=0
+statement maybe
+INSERT INTO t VALUES ({threadid} * 1000 + {i})
+----
+
+# readers must never block or crash regardless of concurrent truncates
+skipif threadid=0
+statement ok
+SELECT COUNT(*) FROM t
+
+endloop
+
+endloop
+
+# final state must be well-defined (non-negative, queryable)
+query I
+SELECT COUNT(*) >= 0 FROM t
+----
+true
+
+statement ok
+INSERT INTO t VALUES (1)
+
+query I
+SELECT COUNT(*) >= 1 FROM t
+----
+true
+
+# table is still consistent: truncate + reinsert works
+statement ok
+TRUNCATE t
+
+query I
+SELECT COUNT(*) FROM t
+----
+0
+
+statement ok
+INSERT INTO t SELECT * FROM range(10);
+
+query I
+SELECT COUNT(*) FROM t
+----
+10

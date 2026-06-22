@@ -1,5 +1,6 @@
 #include "duckdb/parser/peg/transformer/peg_transformer.hpp"
 #include "duckdb/parser/statement/delete_statement.hpp"
+#include "duckdb/parser/statement/truncate_statement.hpp"
 #include "duckdb/parser/query_node/delete_query_node.hpp"
 
 namespace duckdb {
@@ -45,8 +46,8 @@ vector<unique_ptr<TableRef>> PEGTransformerFactory::TransformDeleteUsingClause(P
 unique_ptr<SQLStatement> PEGTransformerFactory::TransformTruncateStatement(PEGTransformer &transformer,
                                                                            const bool &has_result,
                                                                            unique_ptr<BaseTableRef> base_table_name) {
-	auto result = make_uniq<DeleteStatement>();
-	result->node->table = std::move(base_table_name);
+	auto result = make_uniq<TruncateStatement>();
+	result->table = std::move(base_table_name);
 	return std::move(result);
 }
 

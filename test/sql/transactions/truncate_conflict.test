@@ -1,0 +1,209 @@
+# name: test/sql/transactions/truncate_conflict.test
+# description: First-committer-wins conflict detection for TRUNCATE (decision D4)
+# group: [transactions]
+
+statement ok
+SET immediate_transaction_mode=true
+
+# ------------------------------------------------------------------
+# truncate-then-insert: con1 truncates and commits first, con2 then
+# tries to insert and must conflict on COMMIT (first committer wins).
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t1(i INTEGER);
+
+statement ok
+INSERT INTO t1 SELECT * FROM range(100);
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+TRUNCATE t1
+
+statement ok con1
+COMMIT
+
+statement ok con2
+INSERT INTO t1 VALUES (1), (2), (3)
+
+statement error con2
+COMMIT
+----
+<REGEX>:TransactionContext Error.*truncated.*
+
+# first committer won: table is empty
+query I
+SELECT COUNT(*) FROM t1
+----
+0
+
+# ------------------------------------------------------------------
+# insert-then-truncate: con1 inserts and commits first, con2 then
+# tries to truncate and must conflict on COMMIT.
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t2(i INTEGER);
+
+statement ok
+INSERT INTO t2 SELECT * FROM range(50);
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+INSERT INTO t2 VALUES (999)
+
+statement ok con1
+COMMIT
+
+statement ok con2
+TRUNCATE t2
+
+statement error con2
+COMMIT
+----
+<REGEX>:TransactionContext Error.*modified.*
+
+# first committer won: the insert is present, table not truncated
+query I
+SELECT COUNT(*) FROM t2
+----
+51
+
+# ------------------------------------------------------------------
+# truncate vs truncate: second committer aborts.
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE t3(i INTEGER);
+
+statement ok
+INSERT INTO t3 SELECT * FROM range(20);
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+TRUNCATE t3
+
+statement ok con2
+TRUNCATE t3
+
+statement ok con1
+COMMIT
+
+statement error con2
+COMMIT
+----
+<REGEX>:TransactionContext Error.*truncated.*
+
+query I
+SELECT COUNT(*) FROM t3
+----
+0
+
+# ------------------------------------------------------------------
+# read-your-own-writes: a single transaction that both inserts and
+# truncates the SAME table must NOT self-conflict.
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE ryow(i INTEGER);
+
+statement ok
+INSERT INTO ryow SELECT * FROM range(10);
+
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO ryow VALUES (100)
+
+statement ok
+TRUNCATE ryow
+
+statement ok
+INSERT INTO ryow VALUES (42)
+
+statement ok
+COMMIT
+
+query I
+SELECT COUNT(*) FROM ryow
+----
+1
+
+query I
+SELECT i FROM ryow
+----
+42
+
+# truncate then insert then commit in one txn must also succeed
+statement ok
+BEGIN
+
+statement ok
+TRUNCATE ryow
+
+statement ok
+INSERT INTO ryow VALUES (7), (8)
+
+statement ok
+COMMIT
+
+query I
+SELECT COUNT(*) FROM ryow
+----
+2
+
+# ------------------------------------------------------------------
+# non-conflicting: two transactions truncating/inserting DIFFERENT
+# tables both succeed.
+# ------------------------------------------------------------------
+statement ok
+CREATE TABLE a(i INTEGER);
+
+statement ok
+CREATE TABLE b(i INTEGER);
+
+statement ok
+INSERT INTO a SELECT * FROM range(30);
+
+statement ok
+INSERT INTO b SELECT * FROM range(30);
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+TRUNCATE a
+
+statement ok con2
+INSERT INTO b VALUES (123)
+
+statement ok con1
+COMMIT
+
+statement ok con2
+COMMIT
+
+query I
+SELECT COUNT(*) FROM a
+----
+0
+
+query I
+SELECT COUNT(*) FROM b
+----
+31

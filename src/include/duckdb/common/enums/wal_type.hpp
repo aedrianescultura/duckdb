@@ -55,6 +55,9 @@ enum class WALType : uint8_t {
 
 	CREATE_TRIGGER = 30,
 	DROP_TRIGGER = 31,
+
+	//! O(1) TRUNCATE: drops all committed rows of the current table (set via USE_TABLE)
+	TRUNCATE = 32,
 	// -----------------------------
 	// Flush
 	// -----------------------------

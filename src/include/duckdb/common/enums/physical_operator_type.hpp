@@ -81,6 +81,7 @@ enum class PhysicalOperatorType : uint8_t {
 	DELETE_OPERATOR,
 	UPDATE,
 	MERGE_INTO,
+	TRUNCATE_OPERATOR,
 
 	// -----------------------------
 	// Schema

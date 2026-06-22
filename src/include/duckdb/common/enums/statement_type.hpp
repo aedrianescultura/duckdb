@@ -27,6 +27,7 @@ enum class StatementType : uint8_t {
 	UPDATE_STATEMENT,       // update statement type
 	CREATE_STATEMENT,       // create statement type
 	DELETE_STATEMENT,       // delete statement type
+	TRUNCATE_STATEMENT,     // truncate statement type
 	PREPARE_STATEMENT,      // prepare statement type
 	EXECUTE_STATEMENT,      // execute statement type
 	ALTER_STATEMENT,        // alter statement type

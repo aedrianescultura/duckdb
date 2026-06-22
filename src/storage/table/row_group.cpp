@@ -62,6 +62,7 @@ RowGroup::RowGroup(RowGroupCollection &collection_p, RowGroupPointer pointer)
 	this->extra_metadata_blocks = std::move(pointer.extra_metadata_blocks);
 	this->has_per_column_metadata_blocks = pointer.has_per_column_metadata_blocks;
 	this->per_column_metadata_blocks = std::move(pointer.per_column_metadata_blocks);
+	this->birth_generation = pointer.birth_generation;
 
 	Verify();
 }
@@ -438,6 +439,8 @@ bool RowGroup::InitializeScan(CollectionScanState &state, SegmentNode<RowGroup> 
 
 unique_ptr<RowGroup> RowGroup::CreateNewRowGroupCopy(RowGroupCollection &new_collection, idx_t new_column_count) {
 	auto row_group = make_uniq<RowGroup>(new_collection, this->count);
+	// surviving data inherits the source row group's birth generation
+	row_group->birth_generation = birth_generation;
 	row_group->deletes_pointers = deletes_pointers;
 	row_group->deletes_is_loaded = deletes_is_loaded.load();
 	row_group->owned_version_info = owned_version_info;
@@ -836,6 +839,12 @@ void RowGroup::Scan(ScanOptions options, CollectionScanState &state, DataChunk &
 			continue;
 		}
 		auto &current_row_group = state.row_group->GetNode();
+
+		// skip the entire vector if this row group is truncated-dead for the scanning transaction
+		if (!GetCollection().IsRowGroupVisible(current_row_group.birth_generation, transaction)) {
+			NextVector(state);
+			continue;
+		}
 
 		// second, scan the version chunk manager to figure out which tuples to load for this transaction
 		idx_t count = current_row_group.GetSelVector(options, state.vector_index, state.valid_sel, max_count);
@@ -1372,6 +1381,8 @@ vector<RowGroupWriteData> RowGroup::WriteToDisk(RowGroupWriteInfo &info,
 		auto &row_group_write_data = result[row_group_idx];
 		auto &row_group = row_groups[row_group_idx].get();
 		auto result_row_group = make_shared_ptr<RowGroup>(row_group.GetCollection(), row_group.count);
+		// surviving data inherits the source row group's birth generation
+		result_row_group->birth_generation = row_group.birth_generation;
 		result_row_group->columns = std::move(result_columns[row_group_idx]);
 		result_row_group->version_info = row_group.version_info.load();
 		result_row_group->owned_version_info = row_group.owned_version_info;
@@ -1390,6 +1401,11 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriteInfo &info) const {
 }
 
 idx_t RowGroup::GetCommittedRowCount() {
+	// committed-truncate visibility: a row group born before a committed truncate contributes 0 committed rows.
+	// IsRowGroupVisible with a snapshot at TRANSACTION_ID_START sees only committed truncates.
+	if (!GetCollection().IsRowGroupVisible(birth_generation, TransactionData(0, TRANSACTION_ID_START))) {
+		return 0;
+	}
 	auto vinfo = GetVersionInfo();
 	if (!vinfo) {
 		return count;
@@ -1401,6 +1417,9 @@ idx_t RowGroup::GetCommittedRowCount() {
 }
 
 idx_t RowGroup::GetVisibleRowCount(TransactionData transaction) {
+	if (!GetCollection().IsRowGroupVisible(birth_generation, transaction)) {
+		return 0;
+	}
 	auto vinfo = GetVersionInfo();
 	if (!vinfo) {
 		return count;
@@ -1536,6 +1555,8 @@ RowGroupWriteData RowGroup::WriteToDisk(RowGroupWriter &writer) {
 	}
 
 	auto result_row_group = make_shared_ptr<RowGroup>(GetCollection(), this->count);
+	// surviving data inherits this row group's birth generation
+	result_row_group->birth_generation = birth_generation;
 	result_row_group->columns.resize(GetColumnCount());
 	result_row_group->column_pointers.resize(GetColumnCount());
 	result_row_group->deletes_pointers = deletes_pointers;
@@ -1628,6 +1649,7 @@ RowGroupPointer RowGroup::Checkpoint(RowGroupWriteData write_data, RowGroupWrite
 	// construct the row group pointer and write the column meta data to disk
 	row_group_pointer.row_start = row_group_start;
 	row_group_pointer.tuple_count = count;
+	row_group_pointer.birth_generation = birth_generation;
 	if (write_data.write_action == RowGroupWriteAction::REUSE_EXISTING_ROW_GROUP_METADATA) {
 		// we are re-using the previous metadata
 		row_group_pointer.data_pointers = column_pointers;
@@ -1864,6 +1886,8 @@ void RowGroup::Serialize(RowGroupPointer &pointer, Serializer &serializer, bool 
 		serializer.WriteProperty(106, "has_per_column_metadata_blocks", pointer.has_per_column_metadata_blocks);
 		serializer.WritePropertyWithDefault(107, "per_column_metadata_blocks", pointer.per_column_metadata_blocks.data);
 	}
+	// O(1) TRUNCATE: only written when non-zero so unaffected tables stay byte-identical and old readers unaffected.
+	serializer.WritePropertyWithDefault<idx_t>(108, "birth_generation", pointer.birth_generation, 0);
 }
 
 RowGroupPointer RowGroup::Deserialize(Deserializer &deserializer) {
@@ -1883,6 +1907,8 @@ RowGroupPointer RowGroup::Deserialize(Deserializer &deserializer) {
 		result.has_metadata_blocks = false;
 		result.extra_metadata_blocks.clear();
 	}
+	// O(1) TRUNCATE: old files lack this field and load with birth_generation = 0.
+	result.birth_generation = deserializer.ReadPropertyWithExplicitDefault<idx_t>(108, "birth_generation", 0);
 	return result;
 }
 
@@ -1915,6 +1941,13 @@ PartitionStatistics RowGroup::GetPartitionStats(SegmentNode<RowGroup> &row_group
 	PartitionStatistics result;
 	result.row_start = row_group.GetRowStart();
 	result.count = row_group_ref.count;
+	if (row_group_ref.birth_generation < row_group_ref.GetCollection().GetTruncateGeneration()) {
+		// row group is affected by an O(1) truncate: its committed row count depends on the scanning
+		// snapshot's MVCC visibility, so it cannot be precomputed - force a (cheap, skip-per-group) scan
+		result.count_type = CountType::COUNT_APPROXIMATE;
+		result.partition_row_group = make_shared_ptr<DuckDBPartitionRowGroup>(row_group.ReferenceNode(), false);
+		return result;
+	}
 	if (row_group_ref.HasUnloadedDeletes() || row_group_ref.GetVersionInfoIfLoaded()) {
 		// we have version info - approx count
 		result.count_type = CountType::COUNT_APPROXIMATE;

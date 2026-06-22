@@ -1,0 +1,227 @@
+# name: test/sql/storage/truncate_o1_persistent.test
+# description: Test O(1) MVCC TRUNCATE durability (WAL replay, checkpoint reclamation, generation serialization)
+# group: [storage]
+
+# ------------------------------------------------------------------------------
+# Case 1: truncate -> CHECKPOINT -> restart -> COUNT(*) = 0; reinsert works
+# ------------------------------------------------------------------------------
+load {TEST_DIR}/truncate_o1_checkpoint.db
+
+statement ok
+CREATE TABLE t AS FROM range(200000) tbl(i);
+
+query I
+SELECT COUNT(*) FROM t
+----
+200000
+
+statement ok
+TRUNCATE t
+
+query I
+SELECT COUNT(*) FROM t
+----
+0
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT COUNT(*) FROM t
+----
+0
+
+restart
+
+# truncate is durable across the checkpoint + restart
+query I
+SELECT COUNT(*) FROM t
+----
+0
+
+# reinserting after restart works and is visible
+statement ok
+INSERT INTO t VALUES (1), (2), (3)
+
+query I
+SELECT COUNT(*) FROM t
+----
+3
+
+statement ok
+CHECKPOINT
+
+restart
+
+query II
+SELECT COUNT(*), SUM(i) FROM t
+----
+3	6
+
+# ------------------------------------------------------------------------------
+# Case 2: truncate -> restart WITHOUT explicit CHECKPOINT -> COUNT(*) = 0
+# This exercises the WAL TRUNCATE replay path. disable_checkpoint_on_shutdown +
+# a huge wal_autocheckpoint threshold ensure the truncate stays in the WAL and is
+# only applied via replay on the next load.
+# ------------------------------------------------------------------------------
+load {TEST_DIR}/truncate_o1_wal.db
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+statement ok
+CREATE TABLE w AS FROM range(100000) tbl(i);
+
+statement ok
+CHECKPOINT
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+statement ok
+TRUNCATE w
+
+query I
+SELECT COUNT(*) FROM w
+----
+0
+
+# no explicit CHECKPOINT here: the truncate lives in the WAL and must be replayed on load
+restart
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+PRAGMA wal_autocheckpoint='1TB'
+
+query I
+SELECT COUNT(*) FROM w
+----
+0
+
+# reinsert after WAL replay works
+statement ok
+INSERT INTO w VALUES (42)
+
+query I
+SELECT COUNT(*) FROM w
+----
+1
+
+# ------------------------------------------------------------------------------
+# Case 3: large insert -> truncate -> CHECKPOINT -> space reclaimed
+# ------------------------------------------------------------------------------
+load {TEST_DIR}/truncate_o1_reclaim.db
+
+statement ok
+CREATE TABLE big AS FROM range(1000000) tbl(i);
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TABLE used_before AS SELECT used_blocks FROM pragma_database_size();
+
+statement ok
+TRUNCATE big
+
+statement ok
+CHECKPOINT
+
+# truncated row group blocks must be freed: used_blocks drops after the truncate checkpoint
+query I
+SELECT (SELECT used_blocks FROM pragma_database_size()) < (SELECT used_blocks FROM used_before)
+----
+true
+
+query I
+SELECT COUNT(*) FROM big
+----
+0
+
+restart
+
+query I
+SELECT COUNT(*) FROM big
+----
+0
+
+# ------------------------------------------------------------------------------
+# Case 4: concurrent old snapshot must still see pre-truncate rows, and the
+# truncate must survive a concurrent checkpoint + restart. This exercises the
+# persisted truncate_generation (the dead row groups are retained, not vacuumed,
+# while con1's snapshot is active).
+# ------------------------------------------------------------------------------
+load {TEST_DIR}/truncate_o1_concurrent.db
+
+statement ok
+CREATE TABLE c AS FROM range(50000) tbl(i);
+
+statement ok
+CHECKPOINT
+
+# con1 opens a snapshot before the truncate
+statement ok con1
+BEGIN
+
+query I con1
+SELECT COUNT(*) FROM c
+----
+50000
+
+# default connection truncates and commits
+statement ok
+TRUNCATE c
+
+query I
+SELECT COUNT(*) FROM c
+----
+0
+
+# con1 still sees the pre-truncate rows (MVCC)
+query I con1
+SELECT COUNT(*) FROM c
+----
+50000
+
+# a checkpoint while con1 is active is a concurrent checkpoint: it must NOT vacuum the
+# truncated-dead row groups, and it persists the truncate generation
+statement ok
+CHECKPOINT
+
+query I con1
+SELECT COUNT(*) FROM c
+----
+50000
+
+statement ok con1
+COMMIT
+
+# after con1 commits, the truncate is visible to everyone
+query I
+SELECT COUNT(*) FROM c
+----
+0
+
+restart
+
+# the persisted truncate generation makes the loaded row groups dead after restart
+query I
+SELECT COUNT(*) FROM c
+----
+0
+
+statement ok
+INSERT INTO c VALUES (1)
+
+query I
+SELECT COUNT(*) FROM c
+----
+1

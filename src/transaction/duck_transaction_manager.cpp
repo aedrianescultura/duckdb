@@ -152,9 +152,10 @@ DuckTransactionManager::GetCheckpointType(DuckTransaction &transaction, const Un
 	auto checkpoint_type = CheckpointType::FULL_CHECKPOINT;
 	bool has_other_transactions = HasOtherTransactions(transaction);
 	if (has_other_transactions) {
-		if (undo_properties.has_updates || undo_properties.has_dropped_entries) {
-			// if we have made updates/catalog changes in this transaction we cannot checkpoint
-			// in the presence of other transactions
+		if (undo_properties.has_updates || undo_properties.has_dropped_entries || undo_properties.has_truncate) {
+			// if we have made updates/catalog changes or truncated in this transaction we cannot checkpoint
+			// in the presence of other transactions (a checkpoint would vacuum away truncated-dead row groups
+			// that those older snapshots may still need)
 			string other_transactions;
 			for (auto &active_transaction : active_transactions) {
 				if (!RefersToSameObject(*active_transaction, transaction)) {
