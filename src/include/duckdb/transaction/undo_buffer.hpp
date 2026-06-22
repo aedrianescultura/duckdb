@@ -29,6 +29,9 @@ struct UndoBufferProperties {
 	bool has_index_deletes = false;
 	bool has_catalog_changes = false;
 	bool has_dropped_entries = false;
+	//! O(1) TRUNCATE: frees row groups other snapshots may still need, so it gates checkpointing
+	//! like updates/dropped entries do.
+	bool has_truncate = false;
 };
 
 //! The undo buffer of a transaction is used to hold previous versions of tuples

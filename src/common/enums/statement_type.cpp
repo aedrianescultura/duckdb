@@ -15,6 +15,8 @@ string StatementTypeToString(StatementType type) {
 		return "UPDATE";
 	case StatementType::DELETE_STATEMENT:
 		return "DELETE";
+	case StatementType::TRUNCATE_STATEMENT:
+		return "TRUNCATE";
 	case StatementType::PREPARE_STATEMENT:
 		return "PREPARE";
 	case StatementType::EXECUTE_STATEMENT:

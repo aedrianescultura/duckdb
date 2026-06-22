@@ -18,8 +18,10 @@
 #include "duckdb/storage/write_ahead_log.hpp"
 #include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/delete_info.hpp"
+#include "duckdb/transaction/truncate_info.hpp"
 #include "duckdb/transaction/update_info.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
 
@@ -305,8 +307,11 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info)
 			throw TransactionException("Attempting to modify table %s but another transaction has %s this table",
 			                           table_name, table_modification);
 		}
+		auto &storage = info->table->GetStorage();
+		CheckTruncateConflict(storage);
 		// mark the tuples as committed
-		info->table->GetStorage().CommitAppend(commit_id, info->start_row, info->count);
+		storage.CommitAppend(commit_id, info->start_row, info->count);
+		storage.RecordCommittedModification(commit_id, transaction.transaction_id);
 		break;
 	}
 	case UndoFlags::DELETE_TUPLE: {
@@ -319,7 +324,10 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info)
 			throw TransactionException("Attempting to modify table %s but another transaction has %s this table",
 			                           table_name, table_modification);
 		}
+		auto &storage = info->table->GetStorage();
+		CheckTruncateConflict(storage);
 		CommitDelete(*info);
+		storage.RecordCommittedModification(commit_id, transaction.transaction_id);
 		break;
 	}
 	case UndoFlags::UPDATE_TUPLE: {
@@ -332,7 +340,21 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info)
 			throw TransactionException("Attempting to modify table %s but another transaction has %s this table",
 			                           table_name, table_modification);
 		}
+		auto &storage = info->table->GetStorage();
+		CheckTruncateConflict(storage);
 		info->version_number = commit_id;
+		storage.RecordCommittedModification(commit_id, transaction.transaction_id);
+		break;
+	}
+	case UndoFlags::TRUNCATE: {
+		// truncate: stamp the truncate event with the commit id.
+		// first-committer-wins: conflict if a concurrent modification or truncate committed after we started.
+		auto info = reinterpret_cast<TruncateInfo *>(data);
+		auto &storage = info->table->GetStorage();
+		CheckModificationConflict(storage);
+		CheckTruncateConflict(storage);
+		info->collection->CommitTruncate(info->generation, commit_id);
+		storage.RecordCommittedTruncate(commit_id, transaction.transaction_id);
 		break;
 	}
 	case UndoFlags::ATTACHED_DATABASE:
@@ -341,6 +363,28 @@ void CommitState::CommitEntry(UndoFlags type, data_ptr_t data, CommitInfo &info)
 	}
 	default:
 		throw InternalException("UndoBuffer - don't know how to commit this type!");
+	}
+}
+
+void CommitState::CheckTruncateConflict(DataTable &storage) {
+	transaction_t truncate_commit_id;
+	transaction_t truncate_committer;
+	storage.GetLastCommittedTruncate(truncate_commit_id, truncate_committer);
+	// conflict if a DIFFERENT transaction truncated this table after we started
+	if (truncate_commit_id > transaction.start_time && truncate_committer != transaction.transaction_id) {
+		throw TransactionException("Attempting to modify table %s but another transaction has truncated this table",
+		                           storage.GetTableName());
+	}
+}
+
+void CommitState::CheckModificationConflict(DataTable &storage) {
+	transaction_t modification_commit_id;
+	transaction_t modification_committer;
+	storage.GetLastCommittedModification(modification_commit_id, modification_committer);
+	// conflict if a DIFFERENT transaction modified this table after we started
+	if (modification_commit_id > transaction.start_time && modification_committer != transaction.transaction_id) {
+		throw TransactionException("Attempting to truncate table %s but another transaction has modified this table",
+		                           storage.GetTableName());
 	}
 }
 
@@ -381,6 +425,12 @@ void CommitState::RevertCommit(UndoFlags type, data_ptr_t data) {
 		// update:
 		auto info = reinterpret_cast<UpdateInfo *>(data);
 		info->version_number = transaction_id;
+		break;
+	}
+	case UndoFlags::TRUNCATE: {
+		// truncate: re-stamp the truncate event with the (uncommitted) transaction id
+		auto info = reinterpret_cast<TruncateInfo *>(data);
+		info->collection->CommitTruncate(info->generation, transaction_id);
 		break;
 	}
 	case UndoFlags::ATTACHED_DATABASE:

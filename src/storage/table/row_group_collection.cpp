@@ -24,6 +24,7 @@
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/transaction_data.hpp"
 #include "duckdb/common/storage_compatibility.hpp"
 #include "duckdb/common/type_visitor.hpp"
 
@@ -90,7 +91,7 @@ RowGroupCollection::RowGroupCollection(shared_ptr<DataTableInfo> info_p, BlockMa
     : block_manager(block_manager), row_group_size(row_group_size_p), total_rows(total_rows_p),
       next_row_id(total_rows_p), info(std::move(info_p)), types(std::move(types_p)),
       owned_row_groups(make_shared_ptr<RowGroupSegmentTree>(*this, row_start)), allocation_size(0),
-      row_group_append_mode(RowGroupAppendMode::APPEND_TO_EXISTING) {
+      row_group_append_mode(RowGroupAppendMode::APPEND_TO_EXISTING), truncate_generation(0) {
 	// If the table contains shredded types (variant / geometry) then we can't append to an existing row group
 	for (auto &type : types) {
 		if (TypeVisitor::Contains(type, LogicalTypeId::VARIANT) ||
@@ -112,6 +113,78 @@ idx_t RowGroupCollection::GetNextRowId() const {
 idx_t RowGroupCollection::GetRowGroupCount() const {
 	auto row_groups = GetRowGroups();
 	return row_groups->GetSegmentCount();
+}
+
+bool RowGroupCollection::IsRowGroupVisible(idx_t birth_generation, TransactionData transaction) const {
+	if (truncate_generation.load() <= birth_generation) {
+		return true; // fast path: no truncate past this row group's birth
+	}
+	lock_guard<mutex> guard(truncate_lock);
+	for (auto &e : truncate_events) {
+		if (e->generation <= birth_generation) {
+			continue; // truncate predates the row group's birth
+		}
+		const transaction_t id = e->commit_id.load();
+		// mirror of UseVersion: visible-as-delete iff our own txn or committed before our snapshot
+		if (id == transaction.transaction_id || id < transaction.start_time) {
+			return false; // truncated-dead
+		}
+	}
+	return true;
+}
+
+idx_t RowGroupCollection::Truncate(TransactionData transaction) {
+	lock_guard<mutex> guard(truncate_lock);
+	// bump the generation: every row group born before the new generation becomes truncated-dead
+	idx_t new_generation = truncate_generation.load() + 1;
+	truncate_generation.store(new_generation);
+	// record the (uncommitted) truncate event stamped with the transaction id
+	auto event = make_uniq<TruncateEvent>();
+	event->generation = new_generation;
+	event->commit_id.store(transaction.transaction_id);
+	truncate_events.push_back(std::move(event));
+	// NOTE: we deliberately do NOT reset next_row_id or total_rows.
+	// Row ids must keep increasing, and total_rows stays the physical (estimate-only) count.
+	return new_generation;
+}
+
+void RowGroupCollection::CommitTruncate(idx_t generation, transaction_t commit_id) {
+	lock_guard<mutex> guard(truncate_lock);
+	for (auto &e : truncate_events) {
+		if (e->generation == generation) {
+			e->commit_id.store(commit_id);
+			return;
+		}
+	}
+}
+
+void RowGroupCollection::RollbackTruncate(idx_t generation) {
+	lock_guard<mutex> guard(truncate_lock);
+	for (idx_t i = 0; i < truncate_events.size(); i++) {
+		if (truncate_events[i]->generation != generation) {
+			continue;
+		}
+		truncate_events.erase(truncate_events.begin() + NumericCast<int64_t>(i));
+		// if this was the highest generation, decrement the generation counter back
+		if (generation == truncate_generation.load()) {
+			truncate_generation.store(generation - 1);
+		}
+		return;
+	}
+}
+
+void RowGroupCollection::RestoreTruncateGeneration(idx_t generation) {
+	if (generation == 0) {
+		return; // no truncate persisted
+	}
+	lock_guard<mutex> guard(truncate_lock);
+	truncate_generation.store(generation);
+	// record a single already-committed truncate event: after a restart there are no active snapshots, so any
+	// row group born before the persisted generation must be dead for every future transaction.
+	auto event = make_uniq<TruncateEvent>();
+	event->generation = generation;
+	event->commit_id.store(0); // committed before any future transaction (0 < start_time of any new snapshot)
+	truncate_events.push_back(std::move(event));
 }
 
 const vector<LogicalType> &RowGroupCollection::GetTypes() const {
@@ -157,6 +230,9 @@ void RowGroupCollection::Initialize(PersistentTableData &data) {
 	metadata_pointers = data.read_metadata_pointers;
 	owned_row_groups->Initialize(data, metadata_pointers);
 	stats.Initialize(types, data);
+	// O(1) TRUNCATE: restore the committed truncate generation so any persisted row groups born before it
+	// (loaded with birth_generation < generation) are dead for all future snapshots.
+	RestoreTruncateGeneration(data.truncate_generation);
 }
 
 void RowGroupCollection::FinalizeCheckpoint(MetaBlockPointer pointer,
@@ -202,6 +278,7 @@ ColumnDataType GetColumnDataType(idx_t row_start) {
 
 void RowGroupCollection::AppendRowGroup(SegmentLock &l, idx_t start_row) {
 	auto new_row_group = make_uniq<RowGroup>(*this, 0U);
+	new_row_group->birth_generation = GetTruncateGeneration();
 	new_row_group->InitializeEmpty(types, GetColumnDataType(start_row));
 	owned_row_groups->AppendSegment(l, std::move(new_row_group), start_row);
 	row_group_append_mode = RowGroupAppendMode::APPEND_TO_EXISTING;
@@ -514,7 +591,11 @@ void RowGroupCollection::Fetch(TransactionData transaction, DataChunk &result, c
 		idx_t visible_count = 0;
 		const_reference<SelectionVector> sel_for_fetch(*FlatVector::IncrementalSelectionVector());
 		if (state.fetch_type == FetchType::FORCE_FETCH) {
+			// FORCE_FETCH (e.g. index maintenance) must see physically-present rows, ignore truncate visibility
 			visible_count = run_count;
+		} else if (!IsRowGroupVisible(current_row_group.birth_generation, transaction)) {
+			// row group is truncated-dead for this transaction: contributes no visible rows
+			visible_count = 0;
 		} else {
 			visible_count = current_row_group.Fetch(transaction, offsets, run_count, filter_sel);
 			if (visible_count != run_count) {
@@ -547,6 +628,10 @@ bool RowGroupCollection::CanFetch(TransactionData transaction, const row_t row_i
 		row_group = row_groups->GetSegmentByIndex(l, UnsafeNumericCast<int64_t>(segment_index));
 	}
 	auto &current_row_group = row_group->GetNode();
+	if (!IsRowGroupVisible(current_row_group.birth_generation, transaction)) {
+		// row group is truncated-dead for this transaction: not fetchable
+		return false;
+	}
 	auto offset_in_row_group = UnsafeNumericCast<idx_t>(row_id) - row_group->GetRowStart();
 	SelectionVector visible_sel(1);
 	return current_row_group.Fetch(transaction, &offset_in_row_group, /*count=*/1, visible_sel) == 1;
@@ -581,6 +666,14 @@ void RowGroupCollection::InitializeAppend(TransactionData transaction, TableAppe
 	auto l = state.row_groups->Lock();
 	// We need a new row group if there are none yet or the append mode forces us to create a new row group
 	bool needs_new_row_group = state.row_groups->IsEmpty(l) || row_group_append_mode == RowGroupAppendMode::REQUIRE_NEW;
+	// We also need a new row group if the last row group was born before the current truncate generation:
+	// appending into a truncated-dead row group would make the new rows invisible.
+	if (!needs_new_row_group) {
+		auto last_row_group = state.row_groups->GetLastSegment(l);
+		if (last_row_group->GetNode().birth_generation < GetTruncateGeneration()) {
+			needs_new_row_group = true;
+		}
+	}
 	// Otherwise we evaluate the row_group_append_mode
 	if (!needs_new_row_group) {
 		auto last_row_group = state.row_groups->GetLastSegment(l);
@@ -835,6 +928,9 @@ void RowGroupCollection::MergeStorage(RowGroupCollection &data, optional_ptr<Dat
 		D_ASSERT(entry->GetRowStart() == source_row_groups->GetBaseRowId() + source_offset);
 		auto row_group = entry->MoveNode();
 		row_group->MoveToCollection(*this);
+		// rows merged in from local storage are newly committed: stamp them with the current
+		// truncate generation so a prior truncate does not make them invisible.
+		row_group->birth_generation = GetTruncateGeneration();
 		idx_t row_group_count = row_group->count;
 
 		if (commit_state && merged_count < optimistically_written_count) {
@@ -1326,6 +1422,8 @@ public:
 		for (idx_t target_idx = 0; target_idx < target_count; target_idx++) {
 			idx_t current_row_group_rows = MinValue<idx_t>(row_group_rows, row_group_size);
 			auto new_row_group = make_shared_ptr<RowGroup>(collection, current_row_group_rows);
+			// vacuum-merged rows survived the current generation
+			new_row_group->birth_generation = collection.GetTruncateGeneration();
 			new_row_group->InitializeEmpty(types, ColumnDataType::MAIN_TABLE);
 			new_row_groups.push_back(make_uniq<SegmentNode<RowGroup>>(0ULL, std::move(new_row_group), target_idx));
 			append_counts.push_back(0);

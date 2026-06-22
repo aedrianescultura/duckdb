@@ -117,6 +117,8 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalOperator &op) {
 		return CreatePlan(op.Cast<LogicalInsert>());
 	case LogicalOperatorType::LOGICAL_DELETE:
 		return CreatePlan(op.Cast<LogicalDelete>());
+	case LogicalOperatorType::LOGICAL_TRUNCATE:
+		return CreatePlan(op.Cast<LogicalTruncate>());
 	case LogicalOperatorType::LOGICAL_CHUNK_GET:
 		return CreatePlan(op.Cast<LogicalColumnDataGet>());
 	case LogicalOperatorType::LOGICAL_DELIM_GET:

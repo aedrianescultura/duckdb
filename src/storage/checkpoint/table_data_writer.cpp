@@ -220,6 +220,8 @@ void SingleFileTableDataWriter::FinalizeTable(const TableStatistics &global_stat
 	}
 	// ¬serializer.ShouldSerialize(StorageVersion::V2_0_0) ==> (next_row_id == total_rows)
 	D_ASSERT(serializer.ShouldSerialize(StorageVersion::V2_0_0) || (next_row_id == total_rows));
+	// O(1) TRUNCATE: only written when non-zero so unaffected tables stay byte-identical and old readers unaffected.
+	serializer.WritePropertyWithDefault<idx_t>(106, "truncate_generation", collection.GetTruncateGeneration(), 0);
 }
 
 } // namespace duckdb

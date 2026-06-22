@@ -47,6 +47,10 @@ void CleanupState::CleanupEntry(UndoFlags type, data_ptr_t data) {
 		CleanupUpdate(*info);
 		break;
 	}
+	case UndoFlags::TRUNCATE: {
+		// TODO(phase2-task7): physical reclamation of truncated-dead row groups
+		break;
+	}
 	default:
 		break;
 	}

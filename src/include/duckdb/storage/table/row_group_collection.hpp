@@ -124,6 +124,16 @@ public:
 	                       IndexRemovalType removal_type, optional_idx active_checkpoint = optional_idx());
 
 	idx_t Delete(TransactionData transaction, DuckTableEntry &table_entry, row_t *ids, idx_t count);
+	//! Performs an O(1) truncate by bumping the truncate generation and recording an (uncommitted)
+	//! truncate event stamped with the transaction id. Returns the new generation.
+	idx_t Truncate(TransactionData transaction);
+	//! Stamps the truncate event with the given generation as committed.
+	void CommitTruncate(idx_t generation, transaction_t commit_id);
+	//! Rolls back the truncate event with the given generation.
+	void RollbackTruncate(idx_t generation);
+	//! Restores a persisted committed truncate generation on load. Sets the baseline and records a single
+	//! already-committed truncate event so loaded row groups born before it are dead for all future snapshots.
+	void RestoreTruncateGeneration(idx_t generation);
 	void Update(TransactionData transaction, DuckTableEntry &table_entry, row_t *ids,
 	            const vector<PhysicalIndex> &column_ids, DataChunk &updates);
 	void UpdateColumn(TransactionData transaction, DuckTableEntry &table_entry, Vector &row_ids,
@@ -192,6 +202,15 @@ public:
 	idx_t GetRowGroupSize() const {
 		return row_group_size;
 	}
+
+	//! The current truncate generation. Row groups born at or after this generation are visible.
+	idx_t GetTruncateGeneration() const {
+		return truncate_generation.load();
+	}
+	//! Returns whether a row group born at birth_generation is visible to the given transaction,
+	//! accounting for (possibly uncommitted) truncate events.
+	bool IsRowGroupVisible(idx_t birth_generation, TransactionData transaction) const;
+
 	void SetRowGroupAppendMode(RowGroupAppendMode mode);
 	//! Returns the total amount of segments - use sparingly, as this forces all segments to be loaded
 	idx_t GetSegmentCount();
@@ -233,6 +252,19 @@ private:
 	vector<MetaBlockPointer> metadata_pointers;
 	//! Controls whether the next append creates a new row group or reuses the existing one
 	RowGroupAppendMode row_group_append_mode;
+	//! The current truncate generation. Bumped by TRUNCATE; row groups born before it are truncated-dead.
+	atomic<idx_t> truncate_generation;
+
+	struct TruncateEvent {
+		idx_t generation;
+		//! Holds the deleter transaction_id while uncommitted; the commit_id after commit;
+		//! NOT_DELETED_ID if rolled back.
+		atomic<transaction_t> commit_id;
+	};
+	//! Guards truncate_events
+	mutable mutex truncate_lock;
+	//! unique_ptr because the atomic member of TruncateEvent is non-movable
+	vector<unique_ptr<TruncateEvent>> truncate_events;
 };
 
 class RowGroupIterationHelper {

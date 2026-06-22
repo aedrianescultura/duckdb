@@ -25,6 +25,9 @@ public:
 	idx_t total_rows;
 	idx_t next_row_id;
 	idx_t row_group_count;
+	//! O(1) TRUNCATE: the committed truncate generation baseline. Row groups born before it are dead.
+	//! Defaults to 0 (no truncate) for back-compat with old files.
+	idx_t truncate_generation = 0;
 	MetaBlockPointer block_pointer;
 };
 

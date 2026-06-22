@@ -731,6 +731,8 @@ void CheckpointReader::ReadTableData(CatalogTransaction transaction, Deserialize
 	// row_id numbering, in which case next_row_id = total_rows.
 	auto next_row_id = deserializer.ReadPropertyWithExplicitDefault<idx_t>(105, "next_row_id", total_rows);
 	D_ASSERT(next_row_id >= total_rows);
+	// O(1) TRUNCATE: old files lack this field and load with truncate_generation = 0.
+	auto truncate_generation = deserializer.ReadPropertyWithExplicitDefault<idx_t>(106, "truncate_generation", 0);
 
 	if (!index_storage_infos.empty()) {
 		bound_info.indexes = std::move(index_storage_infos);
@@ -756,6 +758,7 @@ void CheckpointReader::ReadTableData(CatalogTransaction transaction, Deserialize
 
 	bound_info.data->total_rows = total_rows;
 	bound_info.data->next_row_id = next_row_id;
+	bound_info.data->truncate_generation = truncate_generation;
 	bound_info.data->read_metadata_pointers = read_pointers;
 }
 

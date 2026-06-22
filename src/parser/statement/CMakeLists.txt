@@ -26,6 +26,7 @@ add_library_unity(
   select_statement.cpp
   set_statement.cpp
   transaction_statement.cpp
+  truncate_statement.cpp
   update_statement.cpp
   update_extensions_statement.cpp
   vacuum_statement.cpp)

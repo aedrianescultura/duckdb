@@ -523,6 +523,12 @@ void WriteAheadLog::WriteDelete(DataChunk &chunk) {
 	serializer.End();
 }
 
+void WriteAheadLog::WriteTruncate() {
+	// The table is identified by the preceding USE_TABLE record - the truncate carries no payload.
+	WriteAheadLogSerializer serializer(*this, WALType::TRUNCATE);
+	serializer.End();
+}
+
 void WriteAheadLog::WriteUpdate(DataChunk &chunk, const vector<column_t> &column_indexes) {
 	D_ASSERT(chunk.size() > 0);
 	D_ASSERT(chunk.ColumnCount() == 2);

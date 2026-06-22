@@ -155,6 +155,18 @@ public:
 	//! Delete the entries with the specified row identifier from the table
 	idx_t Delete(TableDeleteState &state, ClientContext &context, DuckTableEntry &table_entry, Vector &row_ids,
 	             idx_t count);
+	//! Empties the table. O(1) via a truncate-generation bump when no unique/PK index is present,
+	//! otherwise falls back to an O(n) scan-and-delete to keep index entries consistent.
+	void Truncate(ClientContext &context, DuckTableEntry &table_entry);
+
+	//! Record that a TRUNCATE on this table has committed (used for first-committer-wins conflict detection).
+	void RecordCommittedTruncate(transaction_t commit_id, transaction_t committer);
+	//! Record that an insert/update/delete on this table has committed.
+	void RecordCommittedModification(transaction_t commit_id, transaction_t committer);
+	//! Get the commit id + committer of the last committed TRUNCATE on this table.
+	void GetLastCommittedTruncate(transaction_t &commit_id, transaction_t &committer) const;
+	//! Get the commit id + committer of the last committed insert/update/delete on this table.
+	void GetLastCommittedModification(transaction_t &commit_id, transaction_t &committer) const;
 
 	unique_ptr<TableUpdateState> InitializeUpdate(TableCatalogEntry &table, ClientContext &context,
 	                                              const vector<unique_ptr<BoundConstraint>> &bound_constraints);
@@ -328,6 +340,11 @@ private:
 	//! Rebuild all indexes after vacuuming changed rowid's (used with vacuum_rebuild_indexes setting).
 	void RebuildIndexes();
 
+	//! O(n) truncate fallback: scan-and-delete all committed and local rows (used with unique/PK indexes).
+	void TruncateScanDelete(ClientContext &context, DuckTableEntry &table_entry);
+	//! Discard this transaction's uncommitted local appends for this table.
+	void TruncateLocalStorage(ClientContext &context, DuckTableEntry &table_entry);
+
 	void VerifyForeignKeyConstraint(optional_ptr<LocalTableStorage> storage,
 	                                const BoundForeignKeyConstraint &bound_foreign_key, ClientContext &context,
 	                                DataChunk &chunk, VerifyExistenceType type);
@@ -349,5 +366,11 @@ private:
 	shared_ptr<RowGroupCollection> row_groups;
 	//! The version of the data table
 	atomic<DataTableVersion> version;
+	//! First-committer-wins conflict tracking: commit id + committer of the last committed TRUNCATE.
+	atomic<transaction_t> last_committed_truncate_commit_id {0};
+	atomic<transaction_t> last_committed_truncate_committer {0};
+	//! First-committer-wins conflict tracking: commit id + committer of the last committed insert/update/delete.
+	atomic<transaction_t> last_committed_modification_commit_id {0};
+	atomic<transaction_t> last_committed_modification_committer {0};
 };
 } // namespace duckdb

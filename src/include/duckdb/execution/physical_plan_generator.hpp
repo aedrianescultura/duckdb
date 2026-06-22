@@ -122,6 +122,7 @@ protected:
 	PhysicalOperator &CreatePlan(LogicalCrossProduct &op);
 	PhysicalOperator &CreatePlan(LogicalDelete &op);
 	PhysicalOperator &CreatePlan(LogicalDelimGet &op);
+	PhysicalOperator &CreatePlan(LogicalTruncate &op);
 	PhysicalOperator &CreatePlan(LogicalDistinct &op);
 	PhysicalOperator &CreatePlan(LogicalDummyScan &expr);
 	PhysicalOperator &CreatePlan(LogicalEmptyResult &op);

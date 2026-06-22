@@ -1,0 +1,34 @@
+# name: test/sql/constraints/foreignkey/truncate_fk.test
+# description: TRUNCATE foreign-key semantics (Postgres-style: error on FK existence)
+# group: [foreignkey]
+
+statement ok
+CREATE TABLE parent(id INTEGER PRIMARY KEY);
+
+statement ok
+CREATE TABLE child(id INTEGER, p INTEGER REFERENCES parent(id));
+
+statement ok
+INSERT INTO parent VALUES (1);
+
+# referenced table cannot be truncated even with zero child rows (D5)
+statement error
+TRUNCATE parent
+----
+<REGEX>:.*foreign key.*
+
+# the referencing table itself CAN be truncated
+statement ok
+TRUNCATE child
+
+# self-referencing table errors too
+statement ok
+CREATE TABLE t (id INT PRIMARY KEY, parent INT REFERENCES t (id));
+
+statement ok
+INSERT INTO t VALUES (1, NULL);
+
+statement error
+TRUNCATE t
+----
+<REGEX>:.*foreign key.*

@@ -14,6 +14,7 @@
 
 #include "duckdb/transaction/append_info.hpp"
 #include "duckdb/transaction/delete_info.hpp"
+#include "duckdb/transaction/truncate_info.hpp"
 #include "duckdb/transaction/update_info.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/main/config.hpp"
@@ -123,6 +124,14 @@ void DuckTransaction::PushDelete(DuckTableEntry &table_entry, RowVersionManager 
 			delete_rows[i] = NumericCast<uint16_t>(rows[i]);
 		}
 	}
+}
+
+void DuckTransaction::PushTruncate(DuckTableEntry &table_entry, RowGroupCollection &collection, idx_t generation) {
+	auto undo_entry = undo_buffer.CreateEntry(UndoFlags::TRUNCATE, sizeof(TruncateInfo));
+	auto truncate_info = reinterpret_cast<TruncateInfo *>(undo_entry.GetDataMutable());
+	truncate_info->collection = &collection;
+	truncate_info->table = &table_entry;
+	truncate_info->generation = generation;
 }
 
 void DuckTransaction::PushAppend(DuckTableEntry &table_entry, idx_t start_row, idx_t row_count) {

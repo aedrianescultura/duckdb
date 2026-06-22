@@ -87,6 +87,8 @@ string PhysicalOperatorToString(PhysicalOperatorType type) {
 		return "UPDATE";
 	case PhysicalOperatorType::MERGE_INTO:
 		return "MERGE_INTO";
+	case PhysicalOperatorType::TRUNCATE_OPERATOR:
+		return "TRUNCATE";
 	case PhysicalOperatorType::EMPTY_RESULT:
 		return "EMPTY_RESULT";
 	case PhysicalOperatorType::CREATE_TABLE:
